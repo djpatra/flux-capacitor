@@ -7,9 +7,12 @@ We have bad news. The Flux Capacitor is broken. We need you to fix it.
 It's an imaginary system with made-up rules, dependencies, and constraints. It is designed to test how you might navigate working on a real system.
 
 At a high level:
+
+```
 ┌─────────┐    ┌─────────────┐    ┌─────────────┐    ┌──────┐
 │ SOURCE  │───▶│ PROCESSING  │───▶│ TRANSMITTER │───▶│ SINK │
 └─────────┘    └─────────────┘    └─────────────┘    └──────┘
+```
 
 Each of these is an async tokio task, and they are connected via channels.
 
