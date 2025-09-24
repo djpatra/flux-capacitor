@@ -74,7 +74,7 @@ Rather than first-fit triplet formation, the algorithm:
 
 3. Intelligent Constraint Handling
 
-The dependency validation is sophisticated:
+The dependency validation:
 
      Mirrors sink state exactly (100-message history window)
      
@@ -84,7 +84,7 @@ The dependency validation is sophisticated:
 
      This prevents the case of selecting high-value messages that will score zero points.
 
-4. Efficient Resource Utilization
+4. Efficient Resource Utilization:
 
 The batch packing strategy maximizes value extraction enables
      
