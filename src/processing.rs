@@ -103,7 +103,7 @@ impl Processing {
                         self.flush_batch();
                     }
 
-                    // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
+                    // FIXME: Add a stop criteria. Currently, processing stops when the main exits.
                 }
             }
         }
@@ -185,7 +185,7 @@ impl Processing {
         let multiplier = self.calculate_multiplier_for_sequence(&future_types);
 
         // Add dependency length bonus
-        // FixMe: The dependency calculation in PointsManager is cumulative across all messages.
+        // FIXME: The dependency calculation in PointsManager is cumulative across all messages.
         // It should be calculated for a single message hierarchy (parent-child relationship)
         // We are keeping this calculation simple now. This needs to change when the dependency
         // length calculation in PointsManager change
@@ -410,7 +410,7 @@ impl Processing {
     }
 
     /// Removes message from the respective queue
-    /// FixMe: This can be a potential problem as the function is doing linear search
+    /// FIXME: This can be a potential problem as the function is doing linear search
     /// With the given rate of sourcing and transmission of messages, there will
     /// be about 10K messages in each queue in the steady state. Linear search over
     /// 10K messages (of size ~130 bytes) should not be an issue. But this is one area
@@ -468,7 +468,7 @@ impl Processing {
 
     // Calculate estimated points for all queued messages since the sent history changed
     // after the current batch was finalized. We need to collect updates first to avoid borrow checker issues
-    // FixMe: This iis also a potential area for improvement
+    // FIXME: This iis also a potential area for improvement
     fn update_remaining_message_estimates(&mut self) {
         let mut red_updates = Vec::new();
         let mut yellow_updates = Vec::new();
