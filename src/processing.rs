@@ -109,6 +109,9 @@ impl Processing {
         }
     }
 
+    /// Ingest messages in a batch (limited by MAX_INGEST_PER_CYCLE). This ensures that we have
+    /// accumulated enough messages that we can optimize the ordering for maximum points and create
+    /// a batch for transmission
     fn ingest_messages_batch(&mut self) -> usize {
         let mut count = 0;
 
@@ -195,6 +198,7 @@ impl Processing {
         base_points * multiplier + dependency_bonus
     }
 
+    /// Calculates the multiplier for points based on the implementation in PointsManager
     #[inline]
     fn calculate_multiplier_for_sequence(&self, type_sequence: &VecDeque<u8>) -> u64 {
         let mut multiplier = 4u64; // Default
