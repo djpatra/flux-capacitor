@@ -40,47 +40,50 @@ This algorithm maximizes points within a given time  window while respecting par
 ```
 Three-Tier Strategy:
 
-Perfect Triplet Formation: Create sequences of 3 different message types to unlock 2x scoring multipliers. Also prioritize child messages which have a recent parent.
-Greedy Space Filling: Pack remaining capacity with (highest value, lowest density) messages
-Adaptive Re-estimation: Update points for messages which did not get selected in the current batch
+1. Perfect Triplet Formation:
+    Create sequences of 3 different message types to unlock 2x scoring multipliers. Also prioritize child messages which have a recent parent.
+2. Greedy Space Filling:
+    Pack remaining capacity with (highest value, lowest density) messages
+3. Adaptive Re-estimation:
+    Update points for messages which did not get selected in the current batch
 ```
 
 #### Why This Approach is Near-Optimal
 1. Mathematically Sound Prioritization
 The algorithm correctly identifies that triplet formation is the dominant strategy:
 
-Normal scoring: base_points × 4 + dependency_bonus
-Triplet scoring: base_points × 8 + dependency_bonus
+     Normal scoring: base_points × 4 + dependency_bonus
+     Triplet scoring: base_points × 8 + dependency_bonus
 
-Since high-value messages (Blue=20-50 pts, Yellow=10-20 pts) benefit most from this multiplier, prioritizing triplets with high-value messages yields highest returns.
+     Since high-value messages (Blue=20-50 pts, Yellow=10-20 pts) benefit most from this multiplier, prioritizing triplets with high-value messages yields highest returns.
 
 2. Global Optimization Within Constraints
 Rather than first-fit triplet formation, the algorithm:
 
-Tests all 6 possible orderings for each triplet
-Selects globally optimal combination based on total estimated score
-Handles dependency constraints by validating parent availability
+     Tests all 6 possible orderings for each triplet
+     Selects globally optimal combination based on total estimated score
+     Handles dependency constraints by validating parent availability
 
-This prevents local optima where a suboptimal ordering blocks better combinations.
+     This prevents local optima where a suboptimal ordering blocks better combinations.
 
 3. Intelligent Constraint Handling
 The dependency validation is sophisticated:
 
-Mirrors sink state exactly (100-message history window)
-Predicts 0-point scenarios and avoids them proactively
-Maintains temporal consistency through FIFO expiration
+     Mirrors sink state exactly (100-message history window)
+     Predicts 0-point scenarios and avoids them proactively
+     Maintains temporal consistency through FIFO expiration
 
-This prevents the case of selecting high-value messages that will score zero points.
+     This prevents the case of selecting high-value messages that will score zero points.
 
 4. Efficient Resource Utilization
 The batch packing strategy maximizes value extraction:
 
-Points-per-byte optimization for remaining space
-Precise size accounting prevents bandwidth waste
-Adaptive thresholds for optimization triggers
+     Points-per-byte optimization for remaining space
+     Precise size accounting prevents bandwidth waste
+     Adaptive thresholds for optimization triggers
 
 
-### Shortcomings
+#### Shortcomings
 1. Limited Lookahead Horizon
 The algorithm only considers immediate triplet formation within its buffer without looking ahead to future message arrivals.
 The larger the bugger, bigger and better will be the lookahead horizon. But this will also come with time penalty.
