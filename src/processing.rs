@@ -225,8 +225,8 @@ impl Processing {
         1
     }
 
-    // This is the most important part of the implementation. This logic decides that
-    // if the messages should be rearranged, such that, we can increase our point potential
+    // This is the most important part of the implementation. This logic decides if the
+    // messages should be rearranged, such that, we can increase our point potential
     fn should_optimize(&self) -> bool {
         // Optimize when total queued bytes exceed max of batch size
         let have_enough_data = self.total_queued_bytes() >= Self::MAX_BATCH_SIZE;
