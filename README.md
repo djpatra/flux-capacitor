@@ -90,3 +90,27 @@ The larger the bugger, bigger and better will be the lookahead horizon. But this
 
 2. Batch Boundary Optimization
 The 10ms batch boundaries may split optimal message sequences.
+
+
+#### Time and Space Complexity Analysis
+Time Complexity: O(n log n) per optimization cycle
+
+Detailed Breakdown:
+
+     Queue Sorting: O(n log n) where n = max(queue_lengths)
+
+       Red: O(r log r), Yellow: O(y log y), Blue: O(b log b)
+       Total: O((r+y+b) log(max(r,y,b)))
+
+
+     Triplet Formation: O(6 × min(r,y,b))
+
+       6 orderings × linear scan of smallest queue
+       Typically: O(6 × 1000) = O(6000) ≈ O(1) relative to sorting
+
+
+     Remaining Space Packing: O(remaining × log(remaining))
+
+        Collect: O(r+y+b-selected)
+        Sort by ratio: O(remaining × log(remaining))
+        Pack: O(remaining)
