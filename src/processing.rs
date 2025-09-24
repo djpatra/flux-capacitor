@@ -120,7 +120,7 @@ impl Processing {
                 Ok(message) => {
                     self.state.total_processed += 1;
 
-                    // Skip duplicates immediately
+                    // Process only when not a duplicate
                     if self
                         .state
                         .seen_signatures
