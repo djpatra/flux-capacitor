@@ -41,7 +41,8 @@ This algorithm maximizes points within a given time  window while respecting par
 Three-Tier Strategy:
 
 1. Perfect Triplet Formation:
-    Create sequences of 3 different message types to unlock 2x scoring multipliers. Also prioritize child messages which have a recent parent.
+    Create sequences of 3 different message types to unlock 2x scoring multipliers.
+    Also prioritize child messages which have a recent parent.
 2. Greedy Space Filling:
     Pack remaining capacity with (highest value, lowest density) messages
 3. Adaptive Re-estimation:
@@ -50,6 +51,7 @@ Three-Tier Strategy:
 
 #### Why This Approach is Near-Optimal
 1. Mathematically Sound Prioritization
+
 The algorithm correctly identifies that triplet formation is the dominant strategy:
 
      Normal scoring: base_points × 4 + dependency_bonus
@@ -58,15 +60,16 @@ The algorithm correctly identifies that triplet formation is the dominant strate
      Since high-value messages (Blue=20-50 pts, Yellow=10-20 pts) benefit most from this multiplier, prioritizing triplets with high-value messages yields highest returns.
 
 2. Global Optimization Within Constraints
-Rather than first-fit triplet formation, the algorithm:
 
-     Tests all 6 possible orderings for each triplet
-     Selects globally optimal combination based on total estimated score
-     Handles dependency constraints by validating parent availability
+Rather than first-fit triplet formation, the algorithm:
+     a. Tests all 6 possible orderings for each triplet
+     b. Selects globally optimal combination based on total estimated score
+     c. Handles dependency constraints by validating parent availability
 
      This prevents local optima where a suboptimal ordering blocks better combinations.
 
 3. Intelligent Constraint Handling
+
 The dependency validation is sophisticated:
 
      Mirrors sink state exactly (100-message history window)
@@ -76,11 +79,10 @@ The dependency validation is sophisticated:
      This prevents the case of selecting high-value messages that will score zero points.
 
 4. Efficient Resource Utilization
-The batch packing strategy maximizes value extraction:
 
-     Points-per-byte optimization for remaining space
-     Precise size accounting prevents bandwidth waste
-     Adaptive thresholds for optimization triggers
+The batch packing strategy maximizes value extraction enables
+     Tight point-per-byte optimization for remaining space
+
 
 
 #### Shortcomings
