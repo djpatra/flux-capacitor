@@ -57,13 +57,17 @@ The algorithm correctly identifies that triplet formation is the dominant strate
      Normal scoring: base_points × 4 + dependency_bonus
      Triplet scoring: base_points × 8 + dependency_bonus
 
-     Since high-value messages (Blue=20-50 pts, Yellow=10-20 pts) benefit most from this multiplier, prioritizing triplets with high-value messages yields highest returns.
+     Since high-value messages (Blue=20-50 pts, Yellow=10-20 pts) benefit most from this multiplier, 
+     prioritizing triplets with high-value messages yields highest returns.
 
 2. Global Optimization Within Constraints
 
 Rather than first-fit triplet formation, the algorithm:
+
      a. Tests all 6 possible orderings for each triplet
+
      b. Selects globally optimal combination based on total estimated score
+     
      c. Handles dependency constraints by validating parent availability
 
      This prevents local optima where a suboptimal ordering blocks better combinations.
@@ -73,7 +77,9 @@ Rather than first-fit triplet formation, the algorithm:
 The dependency validation is sophisticated:
 
      Mirrors sink state exactly (100-message history window)
+     
      Predicts 0-point scenarios and avoids them proactively
+     
      Maintains temporal consistency through FIFO expiration
 
      This prevents the case of selecting high-value messages that will score zero points.
@@ -81,6 +87,7 @@ The dependency validation is sophisticated:
 4. Efficient Resource Utilization
 
 The batch packing strategy maximizes value extraction enables
+     
      Tight point-per-byte optimization for remaining space
 
 
