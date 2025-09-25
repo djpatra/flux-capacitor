@@ -321,13 +321,15 @@ impl Processing {
         ];
 
         for &ordering in &orderings {
-            if let Some((triplet, removal_indices)) = self.try_form_triplet_with_order(ordering) {
+            if let Some((triplet, removal_indices, dependency_len)) =
+                self.try_form_triplet_with_order(ordering)
+            {
                 let score: u64 = triplet
                     .iter()
                     .map(|m| self.estimate_message_points(m))
                     .sum();
-                if score > best_score {
-                    best_score = score;
+                if score + dependency_len > best_score {
+                    best_score = score + dependency_len;
                     best_triplet = Some(triplet);
                     best_removal_indices = Some(removal_indices);
                 }
@@ -365,9 +367,10 @@ impl Processing {
     fn try_form_triplet_with_order(
         &self,
         order: [u8; 3],
-    ) -> Option<(Vec<MessageEnum>, Vec<(u8, usize)>)> {
+    ) -> Option<(Vec<MessageEnum>, Vec<(u8, usize)>, u64)> {
         let mut triplet = Vec::new();
         let mut removal_indices = Vec::new(); // (queue_type, index)
+        let mut dependency_len = 0;
 
         for &msg_type in &order {
             let queue = match msg_type {
@@ -394,6 +397,7 @@ impl Processing {
             if let Some(idx) = best_msg_idx {
                 triplet.push(queue[idx].message.clone());
                 removal_indices.push((msg_type, idx));
+                dependency_len += 1;
             } else {
                 // We know there is at-least one message in the queue
                 let msg = queue.first().unwrap();
@@ -403,7 +407,7 @@ impl Processing {
         }
 
         if triplet.len() == 3 {
-            Some((triplet, removal_indices))
+            Some((triplet, removal_indices, dependency_len))
         } else {
             None
         }
