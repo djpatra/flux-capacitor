@@ -35,6 +35,8 @@ struct ProcessingState {
 
     // Performance metrics
     total_processed: u64,
+    total_sent: u64,
+    total_rejected: u64,
     optimal_triplets_sent: u64,
 }
 
@@ -70,6 +72,8 @@ impl Processing {
                 blue_queue: Vec::new(),
                 seen_signatures: HashSet::new(),
                 total_processed: 0,
+                total_sent: 0,
+                total_rejected: 0,
                 optimal_triplets_sent: 0,
             },
             last_metrics_time: std::time::Instant::now(),
@@ -84,6 +88,8 @@ impl Processing {
                 _ = tokio::task::yield_now() => {
                     // Ingest messages in controlled bursts
                     let ingested = self.ingest_messages_batch();
+                    self.state.total_processed += ingested;
+
 
                     // Only optimize if we ingested messages AND either:
                     // 1. We have enough for optimization, OR
@@ -103,7 +109,7 @@ impl Processing {
                         self.flush_batch();
                     }
 
-                    // FIXME: Add a stop criteria. Currently, processing stops when the main exits.
+                    // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
                 }
             }
         }
@@ -112,15 +118,13 @@ impl Processing {
     /// Ingest messages in a batch (limited by MAX_INGEST_PER_CYCLE). This ensures that we have
     /// accumulated enough messages that we can optimize the ordering for maximum points and create
     /// a batch for transmission
-    fn ingest_messages_batch(&mut self) -> usize {
+    fn ingest_messages_batch(&mut self) -> u64 {
         let mut count = 0;
 
         while count < Self::MAX_INGEST_PER_CYCLE {
             match self.rx.try_recv() {
                 Ok(message) => {
-                    self.state.total_processed += 1;
-
-                    // Process only when not a duplicate
+                    // Skip duplicates immediately
                     if self
                         .state
                         .seen_signatures
@@ -146,6 +150,7 @@ impl Processing {
                                 // Parent not in recent history - child will score 0 points
                                 // No point storing it since parent was evicted from sink history
                                 // FixiMe: the behaviour in PointsManager to retain messages with dangling parents
+                                self.state.total_rejected += 1;
                                 continue;
                             }
                         } else {
@@ -158,7 +163,7 @@ impl Processing {
             }
         }
 
-        count
+        count as u64
     }
 
     #[inline]
@@ -185,7 +190,7 @@ impl Processing {
         let multiplier = self.calculate_multiplier_for_sequence(&future_types);
 
         // Add dependency length bonus
-        // FIXME: The dependency calculation in PointsManager is cumulative across all messages.
+        // FixMe: The dependency calculation in PointsManager is cumulative across all messages.
         // It should be calculated for a single message hierarchy (parent-child relationship)
         // We are keeping this calculation simple now. This needs to change when the dependency
         // length calculation in PointsManager change
@@ -225,8 +230,8 @@ impl Processing {
         1
     }
 
-    // This is the most important part of the implementation. This logic decides if the
-    // messages should be rearranged, such that, we can increase our point potential
+    // This is the most important part of the implementation. This logic decides that
+    // if the messages should be rearranged, such that, we can increase our point potential
     fn should_optimize(&self) -> bool {
         // Optimize when total queued bytes exceed max of batch size
         let have_enough_data = self.total_queued_bytes() >= Self::MAX_BATCH_SIZE;
@@ -321,15 +326,11 @@ impl Processing {
         ];
 
         for &ordering in &orderings {
-            if let Some((triplet, removal_indices, dependency_len)) =
+            if let Some((triplet, removal_indices, chain_score)) =
                 self.try_form_triplet_with_order(ordering)
             {
-                let score: u64 = triplet
-                    .iter()
-                    .map(|m| self.estimate_message_points(m))
-                    .sum();
-                if score + dependency_len > best_score {
-                    best_score = score + dependency_len;
+                if chain_score > best_score {
+                    best_score = chain_score;
                     best_triplet = Some(triplet);
                     best_removal_indices = Some(removal_indices);
                 }
@@ -363,14 +364,16 @@ impl Processing {
     }
 
     /// Try to form a triplet of messages (Red, Yellow,Blue) in the order provided to maximize
-    /// the 2x multiplier bonus from the PointManager scoring system
+    /// the 2x multiplier bonus from the PointManager scoring system and also prioritising
+    /// dependency bonus
     fn try_form_triplet_with_order(
         &self,
         order: [u8; 3],
     ) -> Option<(Vec<MessageEnum>, Vec<(u8, usize)>, u64)> {
         let mut triplet = Vec::new();
-        let mut removal_indices = Vec::new(); // (queue_type, index)
-        let mut dependency_len = 0;
+        let mut removal_indices = Vec::new();
+        let mut total_score = 0u64;
+        let mut dependency_chain_length = 0u64;
 
         for &msg_type in &order {
             let queue = match msg_type {
@@ -380,41 +383,88 @@ impl Processing {
                 _ => continue,
             };
 
-            // The best valid message of this type is the one with a parent in recently transmitted messages
-            // If no message with parent is found, then take the first one. Since, the queue is sorted in
-            // reverse order, we know this is the best one.
-            let mut best_msg_idx = None;
+            // Strategy: Prioritize messages with valid parents to extend dependency chains
+            let (selected_message, queue_index, dependency_bonus) =
+                self.select_best_message_for_chain(queue);
 
-            for (idx, msg_info) in queue.iter().enumerate() {
-                if let Some(parent_sig) = msg_info.message.get_parent_signature()
-                    && self.state.sent_signatures.contains(parent_sig)
-                {
-                    best_msg_idx = Some(idx);
-                    break;
-                }
-            }
+            triplet.push(selected_message.clone());
+            removal_indices.push((msg_type, queue_index));
+            dependency_chain_length += dependency_bonus;
 
-            if let Some(idx) = best_msg_idx {
-                triplet.push(queue[idx].message.clone());
-                removal_indices.push((msg_type, idx));
-                dependency_len += 1;
-            } else {
-                // We know there is at-least one message in the queue
-                let msg = queue.first().unwrap();
-                triplet.push(msg.message.clone());
-                removal_indices.push((msg_type, 0));
-            }
+            // Calculate this message's contribution to total score
+            let base_points = selected_message.get_points_value() as u64;
+            let message_score = base_points + dependency_bonus;
+            total_score += message_score;
         }
 
+        // Add bonus for dependency chain length (longer chains = exponential bonus)
+        let chain_bonus = self.calculate_chain_bonus(dependency_chain_length);
+        total_score += chain_bonus;
+
         if triplet.len() == 3 {
-            Some((triplet, removal_indices, dependency_len))
+            Some((triplet, removal_indices, total_score))
         } else {
             None
         }
     }
 
+    /// Select the best message from a queue considering dependency bonus
+    fn select_best_message_for_chain(&self, queue: &[MessageInfo]) -> (MessageEnum, usize, u64) {
+        // Look for messages with valid parents first (extends chains)
+        for (idx, msg_info) in queue.iter().enumerate() {
+            if self.message_extends_chain(&msg_info.message) {
+                let dependency_bonus = self.calculate_dependency_bonus(&msg_info.message);
+                return (msg_info.message.clone(), idx, dependency_bonus);
+            }
+        }
+
+        // No valid parents found, take highest-value message
+        let best_msg = &queue[0];
+        (best_msg.message.clone(), 0, 0)
+    }
+
+    /// Check if a message extends an existing dependency chain
+    #[inline]
+    fn message_extends_chain(&self, message: &MessageEnum) -> bool {
+        if let Some(parent_sig) = message.get_parent_signature() {
+            self.state.sent_signatures.contains(parent_sig)
+        } else {
+            false
+        }
+    }
+
+    /// Calculate dependency bonus for a message based on its chain position
+    #[inline]
+    fn calculate_dependency_bonus(&self, message: &MessageEnum) -> u64 {
+        if let Some(parent_sig) = message.get_parent_signature()
+            && self.state.sent_signatures.contains(parent_sig)
+        {
+            // Find parent's position in sent history (more recent = longer chain)
+            for (depth, sent_sig) in self.state.sent_signatures.iter().rev().enumerate() {
+                if sent_sig == parent_sig {
+                    return (depth + 1) as u64;
+                }
+            }
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Calculate exponential bonus as preference to longer dependency chains
+    #[inline]
+    fn calculate_chain_bonus(&self, chain_length: u64) -> u64 {
+        match chain_length {
+            0 => 0,  // No dependencies
+            1 => 8,  // One dependency
+            2 => 16, // Two dependencies
+            3 => 32, // Three dependencies
+            _ => 64, // Longer chains
+        }
+    }
+
     /// Removes message from the respective queue
-    /// FIXME: This can be a potential problem as the function is doing linear search
+    /// FixMe: This can be a potential problem as the function is doing linear search
     /// With the given rate of sourcing and transmission of messages, there will
     /// be about 10K messages in each queue in the steady state. Linear search over
     /// 10K messages (of size ~130 bytes) should not be an issue. But this is one area
@@ -472,7 +522,7 @@ impl Processing {
 
     // Calculate estimated points for all queued messages since the sent history changed
     // after the current batch was finalized. We need to collect updates first to avoid borrow checker issues
-    // FIXME: This iis also a potential area for improvement
+    // FixMe: This iis also a potential area for improvement
     fn update_remaining_message_estimates(&mut self) {
         let mut red_updates = Vec::new();
         let mut yellow_updates = Vec::new();
@@ -547,6 +597,8 @@ impl Processing {
     /// Transmit the current batch and print perf metrics
     fn flush_batch(&mut self) {
         for message in self.state.current_batch.drain(..) {
+            self.state.total_sent += 1;
+
             if let Err(e) = self.tx.send(message) {
                 eprintln!("Transmitter channel closed: {}", e);
                 return;
@@ -559,8 +611,11 @@ impl Processing {
         // Performance metrics
         if elapsed >= std::time::Duration::from_secs(2) {
             println!(
-                "Processing: {} processed | {} triplets",
-                self.state.total_processed, self.state.optimal_triplets_sent,
+                "Processing: {} processed  |  {} sent  | {} rejected  | {} triplets",
+                self.state.total_processed,
+                self.state.total_sent,
+                self.state.total_rejected,
+                self.state.optimal_triplets_sent,
             );
 
             self.last_metrics_time = std::time::Instant::now();
