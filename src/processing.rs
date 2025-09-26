@@ -248,32 +248,11 @@ impl Processing {
         1
     }
 
-    // This is the most important part of the implementation. This logic decides that
-    // if the messages should be rearranged, such that, we can increase our point potential
-    fn should_optimize(&self) -> bool {
-        // Optimize when total queued bytes exceed max of batch size
-        let have_enough_data = self.total_queued_bytes() >= Self::MAX_BATCH_SIZE;
-
-        // Optimize if we can form  perfect triplets
-        let perfect_triplet_available = self.can_form_triplet();
-
-        perfect_triplet_available || have_enough_data
-    }
-
     #[inline]
     fn can_form_triplet(&self) -> bool {
         !self.state.red_queue.is_empty()
             && !self.state.yellow_queue.is_empty()
             && !self.state.blue_queue.is_empty()
-    }
-
-    #[inline]
-    fn total_queued_bytes(&self) -> usize {
-        let red_bytes: usize = self.state.red_queue.iter().map(|m| m.size_bytes).sum();
-        let yellow_bytes: usize = self.state.yellow_queue.iter().map(|m| m.size_bytes).sum();
-        let blue_bytes: usize = self.state.blue_queue.iter().map(|m| m.size_bytes).sum();
-
-        red_bytes + yellow_bytes + blue_bytes
     }
 
     /// Optimization engine that implements the point-maximization strategy for the time based scoring window.
