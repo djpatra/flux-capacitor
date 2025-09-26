@@ -91,31 +91,31 @@ impl Processing {
 
         loop {
             tokio::select! {
-                _ = async {
+                    _ = async {
                     loop {
-                        // Does timer wants ingestion to stop and optimize
-                        if should_optimize_clone.load(Ordering::Relaxed) {
-                            break;
-                        }
-
-                        let ingested = self.ingest_messages_batch();
-                        self.state.total_processed += ingested;
-
-                        // Yield to allow timer to signal
-                        tokio::task::yield_now().await;
+                    // Does timer wants ingestion to stop and optimize
+                    if should_optimize_clone.load(Ordering::Relaxed) {
+                        break;
                     }
-                } => {
-                    // Timer has signalled; Optimize the batch now
-                    self.handle_timer_signal();
-                    should_optimize.store(false, Ordering::Relaxed);
-                }
 
-                _ = batch_ticker.tick() => {
-                    // Signal ingestion to stop and start optimization
-                    should_optimize.store(true, Ordering::Relaxed);
+                    let ingested = self.ingest_messages_batch();
+                    self.state.total_processed += ingested;
 
-                    // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
+                    // Yield to allow timer to signal
+                    tokio::task::yield_now().await;
                 }
+            } => {
+                // Timer has signalled; Optimize the batch now
+                self.handle_timer_signal();
+                should_optimize.store(false, Ordering::Relaxed);
+            }
+
+            _ = batch_ticker.tick() => {
+                // Signal ingestion to stop and start optimization
+                should_optimize.store(true, Ordering::Relaxed);
+
+                // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
+            }
             }
         }
     }
