@@ -2,6 +2,8 @@ use crate::{MessageEnum, MessageTrait};
 use crossbeam::channel::{Receiver, Sender};
 use std::cmp::Reverse;
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 struct MessageInfo {
@@ -54,9 +56,10 @@ impl Processing {
     // Keeping size 8 to make it cache friendly
     const TYPE_PATTERN_WINDOW: usize = 8;
     // 4096 / 32 = 128 is the maximum number of messages we can fill in a batch.
-    // We will keep the number of messages that need to be ingested 4X of this
-    // value so that we ensure that we have seen enough messages of each type
-    const MAX_INGEST_PER_CYCLE: usize = 4 * 128;
+    // We will keep the number of messages that need to be ingested in a short
+    // ingest burst 10X of this value, so that, we ensure that we have seen enough
+    // messages of each type
+    const MAX_INGEST_PER_CYCLE: usize = 10 * 128;
 
     pub fn new(rx: Receiver<MessageEnum>, tx: Sender<MessageEnum>) -> Self {
         Self {
@@ -83,35 +86,50 @@ impl Processing {
     pub async fn start(&mut self) {
         let mut batch_ticker = tokio::time::interval(tokio::time::Duration::from_millis(10));
 
+        let should_optimize = Arc::new(AtomicBool::new(false));
+        let should_optimize_clone = should_optimize.clone();
+
         loop {
             tokio::select! {
-                _ = tokio::task::yield_now() => {
-                    // Ingest messages in controlled bursts
-                    let ingested = self.ingest_messages_batch();
-                    self.state.total_processed += ingested;
+                _ = async {
+                    loop {
+                        // Does timer wants ingestion to stop and optimize
+                        if should_optimize_clone.load(Ordering::Relaxed) {
+                            break;
+                        }
 
+                        let ingested = self.ingest_messages_batch();
+                        self.state.total_processed += ingested;
 
-                    // Only optimize if we ingested messages AND either:
-                    // 1. We have enough for optimization, OR
-                    // 2. Current batch is getting full
-                    if ingested > 0 && self.should_optimize() {
-                        self.optimize_current_batch();
+                        // Yield to allow timer to signal
+                        tokio::task::yield_now().await;
                     }
+                } => {
+                    // Timer has signalled; Optimize the batch now
+                    self.handle_timer_signal();
+                    should_optimize.store(false, Ordering::Relaxed);
                 }
 
                 _ = batch_ticker.tick() => {
-                    // Final optimization before sending
-                    if !self.all_queues_empty() && self.has_batch_space() {
-                        self.optimize_current_batch();
-                    }
-
-                    if !self.state.current_batch.is_empty() {
-                        self.flush_batch();
-                    }
+                    // Signal ingestion to stop and start optimization
+                    should_optimize.store(true, Ordering::Relaxed);
 
                     // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
                 }
             }
+        }
+    }
+
+    // Handle the timer signal - optimize and flush batch
+    fn handle_timer_signal(&mut self) {
+        // Optimize the betch
+        if !self.all_queues_empty() {
+            self.optimize_current_batch();
+        }
+
+        // Send the batch if we have messages
+        if !self.state.current_batch.is_empty() {
+            self.flush_batch();
         }
     }
 
@@ -141,7 +159,7 @@ impl Processing {
                             point_estimate,
                         };
 
-                        // Check if this message has a parent dependency
+                        // Doesthis message has a parent dependency
                         if let Some(ref parent_sig) = parent_signature {
                             if self.state.sent_signatures.contains(parent_sig) {
                                 // Parent is in our recent sent history - message is viable
