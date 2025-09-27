@@ -20,6 +20,9 @@ struct ProcessingState {
     // Last few sent types
     sent_types: VecDeque<u8>,
 
+    // Signatures of the ingested messages which are yet to be sent
+    accumulated_signatures: HashSet<Vec<u8>>,
+
     // Current batch to be transmitted
     current_batch: Vec<MessageEnum>,
     current_batch_size: usize,
@@ -68,6 +71,7 @@ impl Processing {
             state: ProcessingState {
                 sent_signatures: VecDeque::with_capacity(Self::SINK_HISTORY_SIZE),
                 sent_types: VecDeque::with_capacity(Self::TYPE_PATTERN_WINDOW),
+                accumulated_signatures: HashSet::new(),
                 current_batch: Vec::new(),
                 current_batch_size: 0,
                 red_queue: Vec::new(),
@@ -163,6 +167,10 @@ impl Processing {
                         if let Some(ref parent_sig) = parent_signature {
                             if self.state.sent_signatures.contains(parent_sig) {
                                 // Parent is in our recent sent history - message is viable
+                                self.state
+                                    .accumulated_signatures
+                                    .insert(msg_info.message.get_signature().clone());
+
                                 self.store_message_by_type(msg_info);
                             } else {
                                 // Parent not in recent history - child will score 0 points
@@ -173,6 +181,10 @@ impl Processing {
                             }
                         } else {
                             // No parent dependency - immediately viable
+                            self.state
+                                .accumulated_signatures
+                                .insert(msg_info.message.get_signature().clone());
+
                             self.store_message_by_type(msg_info);
                         }
                     }
@@ -370,7 +382,7 @@ impl Processing {
         let mut triplet = Vec::new();
         let mut removal_indices = Vec::new();
         let mut total_score = 0u64;
-        let mut dependency_chain_length = 0u64;
+        let mut batch_signatures = HashSet::new(); // Track signatures in this potential triplet
 
         for &msg_type in &order {
             let queue = match msg_type {
@@ -380,34 +392,84 @@ impl Processing {
                 _ => continue,
             };
 
-            // Strategy: Prioritize messages with valid parents to extend dependency chains
+            // Find best message considering internal dependencies
             let (selected_message, queue_index, dependency_bonus) =
-                self.select_best_message_for_chain(queue);
+                self.select_best_message_for_chain(queue, &batch_signatures);
 
+            batch_signatures.insert(selected_message.get_signature().clone());
             triplet.push(selected_message.clone());
             removal_indices.push((msg_type, queue_index));
-            dependency_chain_length += dependency_bonus;
 
-            // Calculate this message's contribution to total score
             let base_points = selected_message.get_points_value() as u64;
             let message_score = base_points + dependency_bonus;
             total_score += message_score;
         }
 
-        // Add bonus for dependency chain length (longer chains = exponential bonus)
-        let chain_bonus = self.calculate_chain_bonus(dependency_chain_length);
-        total_score += chain_bonus;
-
         if triplet.len() == 3 {
-            Some((triplet, removal_indices, total_score))
+            // Order the triplet to respect parent-child relationships
+            let ordered_triplet = self.order_by_dependencies(triplet);
+            Some((ordered_triplet, removal_indices, total_score))
         } else {
             None
         }
     }
 
+    /// Order messages to ensure parents come before children
+    fn order_by_dependencies(&self, mut messages: Vec<MessageEnum>) -> Vec<MessageEnum> {
+        let mut ordered = Vec::new();
+        let mut remaining: Vec<_> = messages.drain(..).collect();
+        let mut signatures_added = HashSet::new();
+
+        // Add messages with dependencies already satisfied first
+        while !remaining.is_empty() {
+            let mut progress = false;
+
+            for i in (0..remaining.len()).rev() {
+                let message = &remaining[i];
+                let can_add = if let Some(parent_sig) = message.get_parent_signature() {
+                    // Check if parent is already in ordered list or sent history
+                    signatures_added.contains(parent_sig)
+                        || self.state.sent_signatures.contains(parent_sig)
+                } else {
+                    // No parent dependency
+                    true
+                };
+
+                if can_add {
+                    let msg = remaining.remove(i);
+                    signatures_added.insert(msg.get_signature().clone());
+                    ordered.push(msg);
+                    progress = true;
+                }
+            }
+
+            // If no progress, add remaining messages anyway
+            if !progress {
+                ordered.extend(remaining.drain(..));
+                break;
+            }
+        }
+
+        ordered
+    }
+
     /// Select the best message from a queue considering dependency bonus
-    fn select_best_message_for_chain(&self, queue: &[MessageInfo]) -> (MessageEnum, usize, u64) {
-        // Look for messages with valid parents first (extends chains)
+    fn select_best_message_for_chain(
+        &self,
+        queue: &[MessageInfo],
+        batch_signatures: &HashSet<Vec<u8>>,
+    ) -> (MessageEnum, usize, u64) {
+        // First, look for messages whose parent is in the current batch
+        for (idx, msg_info) in queue.iter().enumerate() {
+            if let Some(parent_sig) = msg_info.message.get_parent_signature() {
+                if batch_signatures.contains(parent_sig) {
+                    // Parent is in current batch - high dependency bonus
+                    return (msg_info.message.clone(), idx, 10);
+                }
+            }
+        }
+
+        // Second, look for messages whose parent is in sent history
         for (idx, msg_info) in queue.iter().enumerate() {
             if self.message_extends_chain(&msg_info.message) {
                 let dependency_bonus = self.calculate_dependency_bonus(&msg_info.message);
@@ -415,7 +477,7 @@ impl Processing {
             }
         }
 
-        // No valid parents found, take highest-value message
+        // No dependencies found, take highest-value message
         let best_msg = &queue[0];
         (best_msg.message.clone(), 0, 0)
     }
@@ -445,18 +507,6 @@ impl Processing {
             1
         } else {
             0
-        }
-    }
-
-    /// Calculate exponential bonus as preference to longer dependency chains
-    #[inline]
-    fn calculate_chain_bonus(&self, chain_length: u64) -> u64 {
-        match chain_length {
-            0 => 0,  // No dependencies
-            1 => 8,  // One dependency
-            2 => 16, // Two dependencies
-            3 => 32, // Three dependencies
-            _ => 64, // Longer chains
         }
     }
 
@@ -560,9 +610,10 @@ impl Processing {
         let size_bytes = message.to_bytes().len();
         self.state.current_batch_size += size_bytes;
 
-        self.state
-            .sent_signatures
-            .push_back(message.get_signature().clone());
+        let signature = message.get_signature();
+        self.state.accumulated_signatures.remove(signature);
+
+        self.state.sent_signatures.push_back(signature.clone());
 
         // Evict oldest message
         if self.state.sent_signatures.len() > Self::SINK_HISTORY_SIZE {
