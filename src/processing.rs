@@ -3,6 +3,7 @@ use crossbeam::channel::{Receiver, Sender};
 use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 use std::cmp::Reverse;
 use std::collections::HashSet;
+use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -157,7 +158,7 @@ impl Processing {
 
                         let size_bytes = message.to_bytes().len();
                         let parent_signature = message.get_parent_signature().cloned();
-                        let point_estimate = self.estimate_message_points(&message);
+                        let point_estimate = message.get_points_value() as u64;
                         let msg_info = MessageInfo {
                             message,
                             size_bytes,
@@ -207,63 +208,6 @@ impl Processing {
         }
     }
 
-    /// Estimate points this message would get based on current predicted sink state
-    #[inline]
-    fn estimate_message_points(&self, message: &MessageEnum) -> u64 {
-        // Base points from message
-        let base_points = message.get_points_value() as u64;
-
-        // Predict multiplier based on type sequence if we send this message next
-        // Small data structure. So, no harm in cloning
-        let mut future_types = self.state.sent_types.clone();
-        future_types.push(message.get_type());
-
-        let multiplier = self.calculate_multiplier_for_sequence(&future_types);
-
-        // Add dependency length bonus
-        // FixMe: The dependency calculation in PointsManager is cumulative across all messages.
-        // It should be calculated for a single message hierarchy (parent-child relationship)
-        // We are keeping this calculation simple now. This needs to change when the dependency
-        // length calculation in PointsManager change
-        let dependency_bonus = if message.get_parent_signature().is_some() {
-            self.estimate_dependency_length()
-        } else {
-            0
-        };
-
-        base_points * multiplier + dependency_bonus
-    }
-
-    /// Calculates the multiplier for points based on the implementation in PointsManager
-    #[inline]
-    fn calculate_multiplier_for_sequence(
-        &self,
-        type_sequence: &ConstGenericRingBuffer<u8, 8>,
-    ) -> u64 {
-        let mut multiplier = 4u64; // Default
-
-        if type_sequence.len() >= 3 {
-            // Look at last 3 types
-            let last_three: Vec<u8> = type_sequence.iter().rev().take(3).copied().collect();
-            let unique_types: HashSet<u8> = last_three.iter().copied().collect();
-
-            if unique_types.len() >= 3 {
-                multiplier *= 2; // All different -> 8x total
-            } else if unique_types.len() == 1 {
-                multiplier /= 2; // All same -> 2x total
-            }
-            // unique_types.len() == 2 keeps default 4x
-        }
-
-        multiplier
-    }
-
-    // Simplified estimation of dependency length
-    #[inline]
-    fn estimate_dependency_length(&self) -> u64 {
-        1
-    }
-
     #[inline]
     fn can_form_triplet(&self) -> bool {
         !self.state.red_queue.is_empty()
@@ -275,10 +219,9 @@ impl Processing {
     /// This function transforms the queued messages into an ordered batch that maximizes points at the sink
     /// by creating triplets with 2x multipliers, prioritizing high-value messages, and respecting parent-child
     /// relationship.
-    /// It works in 3 steps:
+    /// It works in 2 steps:
     /// 1. Perfect triplet formation [Exactly one message of each type (Red, Yellow, Blue)]
     /// 2. Remaining space optimization
-    /// 3. Recalculation of points for the remaining messages
     fn optimize_current_batch(&mut self) {
         // Sort each queue by estimated points
         self.state
@@ -318,11 +261,8 @@ impl Processing {
                 .iter()
                 .map(|e| e.get_signature().clone())
                 .collect();
-            self.pack_remaining_space_optimally(batch_signatures);
+            self.pack_remaining_space_optimally(batch_signatures, self.state.sent_types.clone());
         }
-
-        // Step 3: Re calculate points for remaining messages
-        self.update_remaining_message_estimates();
     }
 
     /// Find the globally optimal triplet in 3 steps
@@ -545,7 +485,11 @@ impl Processing {
     }
 
     /// Collect all valid remaining messages
-    fn pack_remaining_space_optimally(&mut self, batch_signatures: HashSet<Vec<u8>>) {
+    fn pack_remaining_space_optimally(
+        &mut self,
+        batch_signatures: HashSet<Vec<u8>>,
+        type_sequence: ConstGenericRingBuffer<u8, 8>,
+    ) {
         let mut all_valid = Vec::new();
 
         for msg_info in &self.state.red_queue {
@@ -567,59 +511,64 @@ impl Processing {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Pack greedily
-        for msg_info in all_valid {
-            if self.state.current_batch_size + msg_info.size_bytes <= Self::MAX_BATCH_SIZE {
-                let parent_sig = msg_info.message.get_parent_signature();
+        let mut last_three: ConstGenericRingBuffer<u8, 3> =
+            type_sequence.iter().rev().take(3).copied().collect();
 
-                if parent_sig.is_none()
-                    || batch_signatures.contains(parent_sig.unwrap())
-                    || self.state.sent_signatures.contains(parent_sig.unwrap())
-                {
-                    let message = msg_info.message.clone();
-                    self.add_to_batch(message);
-                    self.remove_message_from_queue(&msg_info.message);
-                }
+        let mut i = 0;
+        let mut used_set = HashSet::<usize>::new();
+
+        while i < all_valid.len() {
+            if used_set.contains(&i) {
+                i += 1;
+                continue;
             }
+
+            let mut msg_info = &all_valid[i];
+            // Check if adding the current message exceeds batch size
+            if self.state.current_batch_size + msg_info.size_bytes > Self::MAX_BATCH_SIZE {
+                break;
+            }
+
+            // Handle special case when last three messages have the same type
+            if last_three[1] == last_three[2] && last_three[2] == msg_info.message.get_type() {
+                if let Some(next_msg_info) =
+                    Self::find_next_valid_message(&all_valid, i + 1, last_three[2])
+                {
+                    msg_info = next_msg_info;
+                    used_set.insert(i + 1);
+                }
+            } else {
+                i += 1;
+            }
+
+            let parent_sig = msg_info.message.get_parent_signature();
+
+            //Validate parent signature and process
+            if parent_sig.is_none()
+                || batch_signatures.contains(parent_sig.unwrap())
+                || self.state.sent_signatures.contains(parent_sig.unwrap())
+            {
+                let message = msg_info.message.clone();
+                self.add_to_batch(message);
+                self.remove_message_from_queue(&msg_info.message);
+                last_three.push(msg_info.message.get_type());
+            }
+
+            i += 1;
         }
+        // Pack greedily
     }
 
-    // Calculate estimated points for all queued messages since the sent history changed
-    // after the current batch was finalized. We need to collect updates first to avoid borrow checker issues
-    // FixMe: This iis also a potential area for improvement
-    fn update_remaining_message_estimates(&mut self) {
-        let mut red_updates = Vec::new();
-        let mut yellow_updates = Vec::new();
-        let mut blue_updates = Vec::new();
-
-        // Collect all messages that need point recalculation
-        for (i, msg_info) in self.state.red_queue.iter().enumerate() {
-            let new_points = self.estimate_message_points(&msg_info.message);
-            red_updates.push((i, new_points));
-        }
-
-        for (i, msg_info) in self.state.yellow_queue.iter().enumerate() {
-            let new_points = self.estimate_message_points(&msg_info.message);
-            yellow_updates.push((i, new_points));
-        }
-
-        for (i, msg_info) in self.state.blue_queue.iter().enumerate() {
-            let new_points = self.estimate_message_points(&msg_info.message);
-            blue_updates.push((i, new_points));
-        }
-
-        // Apply the updates
-        for (i, new_points) in red_updates {
-            self.state.red_queue[i].point_estimate = new_points;
-        }
-
-        for (i, new_points) in yellow_updates {
-            self.state.yellow_queue[i].point_estimate = new_points;
-        }
-
-        for (i, new_points) in blue_updates {
-            self.state.blue_queue[i].point_estimate = new_points;
-        }
+    #[inline]
+    fn find_next_valid_message(
+        all_valid: &[MessageInfo],
+        start_index: usize,
+        prev_type: u8,
+    ) -> Option<&MessageInfo> {
+        all_valid.iter().skip(start_index).find(|msg_info| {
+            msg_info.message.get_type() != prev_type
+                && msg_info.message.get_parent_signature().is_none()
+        })
     }
 
     /// Add a message to the current batch
