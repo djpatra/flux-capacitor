@@ -308,7 +308,13 @@ impl Processing {
 
         // Step 2: If the batch is not filled with triplets, then try high-value singles
         if self.state.current_batch.is_empty() || self.has_batch_space() {
-            self.pack_remaining_space_optimally();
+            let batch_signatures: HashSet<Vec<u8>> = self
+                .state
+                .current_batch
+                .iter()
+                .map(|e| e.get_signature().clone())
+                .collect();
+            self.pack_remaining_space_optimally(batch_signatures);
         }
 
         // Step 3: Re calculate points for remaining messages
@@ -535,7 +541,7 @@ impl Processing {
     }
 
     /// Collect all valid remaining messages
-    fn pack_remaining_space_optimally(&mut self) {
+    fn pack_remaining_space_optimally(&mut self, batch_signatures: HashSet<Vec<u8>>) {
         let mut all_valid = Vec::new();
 
         for msg_info in &self.state.red_queue {
@@ -560,9 +566,13 @@ impl Processing {
         // Pack greedily
         for msg_info in all_valid {
             if self.state.current_batch_size + msg_info.size_bytes <= Self::MAX_BATCH_SIZE {
-                let message = msg_info.message.clone();
-                self.add_to_batch(message);
-                self.remove_message_from_queue(&msg_info.message);
+                let parent_sig = msg_info.message.get_parent_signature();
+
+                if parent_sig.is_none() || batch_signatures.contains(parent_sig.unwrap()) {
+                    let message = msg_info.message.clone();
+                    self.add_to_batch(message);
+                    self.remove_message_from_queue(&msg_info.message);
+                }
             }
         }
     }
