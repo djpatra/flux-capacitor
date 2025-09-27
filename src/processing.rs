@@ -1,7 +1,8 @@
 use crate::{MessageEnum, MessageTrait};
 use crossbeam::channel::{Receiver, Sender};
+use ringbuffer::{ConstGenericRingBuffer, RingBuffer};
 use std::cmp::Reverse;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -16,9 +17,11 @@ struct MessageInfo {
 struct ProcessingState {
     // Transmitted messages; enables to predict the sink state
     // Last 100 sent (matches PointsManager history)
-    sent_signatures: VecDeque<Vec<u8>>,
-    // Last few sent types
-    sent_types: VecDeque<u8>,
+    sent_signatures: ConstGenericRingBuffer<Vec<u8>, 100>,
+
+    // To pattern match the types of consecutive messages sent
+    // Keeping size 8 to make it cache friendly
+    sent_types: ConstGenericRingBuffer<u8, 8>,
 
     // Signatures of the ingested messages which are yet to be sent
     accumulated_signatures: HashSet<Vec<u8>>,
@@ -53,24 +56,22 @@ pub struct Processing {
 }
 
 impl Processing {
+    // Maximum number of bytes that can be transmitted
     const MAX_BATCH_SIZE: usize = 4096;
-    const SINK_HISTORY_SIZE: usize = 100;
-    // To pattern match the types of consecutive messages sent
-    // Keeping size 8 to make it cache friendly
-    const TYPE_PATTERN_WINDOW: usize = 8;
+
     // 4096 / 32 = 128 is the maximum number of messages we can fill in a batch.
     // We will keep the number of messages that need to be ingested in a short
-    // ingest burst 10X of this value, so that, we ensure that we have seen enough
+    // ingest burst 8X of this value, so that, we ensure that we have seen enough
     // messages of each type
-    const MAX_INGEST_PER_CYCLE: usize = 10 * 128;
+    const MAX_INGEST_PER_CYCLE: usize = 8 * 128;
 
     pub fn new(rx: Receiver<MessageEnum>, tx: Sender<MessageEnum>) -> Self {
         Self {
             rx,
             tx,
             state: ProcessingState {
-                sent_signatures: VecDeque::with_capacity(Self::SINK_HISTORY_SIZE),
-                sent_types: VecDeque::with_capacity(Self::TYPE_PATTERN_WINDOW),
+                sent_signatures: ConstGenericRingBuffer::new(),
+                sent_types: ConstGenericRingBuffer::new(),
                 accumulated_signatures: HashSet::new(),
                 current_batch: Vec::new(),
                 current_batch_size: 0,
@@ -119,7 +120,7 @@ impl Processing {
                 should_optimize.store(true, Ordering::Relaxed);
 
                 // FixMe: Add a stop criteria. Currently, processing stops when the main exits.
-            }
+                }
             }
         }
     }
@@ -215,7 +216,7 @@ impl Processing {
         // Predict multiplier based on type sequence if we send this message next
         // Small data structure. So, no harm in cloning
         let mut future_types = self.state.sent_types.clone();
-        future_types.push_back(message.get_type());
+        future_types.push(message.get_type());
 
         let multiplier = self.calculate_multiplier_for_sequence(&future_types);
 
@@ -235,7 +236,10 @@ impl Processing {
 
     /// Calculates the multiplier for points based on the implementation in PointsManager
     #[inline]
-    fn calculate_multiplier_for_sequence(&self, type_sequence: &VecDeque<u8>) -> u64 {
+    fn calculate_multiplier_for_sequence(
+        &self,
+        type_sequence: &ConstGenericRingBuffer<u8, 8>,
+    ) -> u64 {
         let mut multiplier = 4u64; // Default
 
         if type_sequence.len() >= 3 {
@@ -568,7 +572,10 @@ impl Processing {
             if self.state.current_batch_size + msg_info.size_bytes <= Self::MAX_BATCH_SIZE {
                 let parent_sig = msg_info.message.get_parent_signature();
 
-                if parent_sig.is_none() || batch_signatures.contains(parent_sig.unwrap()) {
+                if parent_sig.is_none()
+                    || batch_signatures.contains(parent_sig.unwrap())
+                    || self.state.sent_signatures.contains(parent_sig.unwrap())
+                {
                     let message = msg_info.message.clone();
                     self.add_to_batch(message);
                     self.remove_message_from_queue(&msg_info.message);
@@ -618,24 +625,15 @@ impl Processing {
     /// Add a message to the current batch
     fn add_to_batch(&mut self, message: MessageEnum) {
         let size_bytes = message.to_bytes().len();
+        let signature = message.get_signature();
+
         self.state.current_batch_size += size_bytes;
 
-        let signature = message.get_signature();
         self.state.accumulated_signatures.remove(signature);
 
-        self.state.sent_signatures.push_back(signature.clone());
+        self.state.sent_signatures.push(signature.clone());
 
-        // Evict oldest message
-        if self.state.sent_signatures.len() > Self::SINK_HISTORY_SIZE {
-            self.state.sent_signatures.pop_front();
-        }
-
-        self.state.sent_types.push_back(message.get_type());
-
-        // Evict type of the old message
-        if self.state.sent_types.len() > Self::TYPE_PATTERN_WINDOW {
-            self.state.sent_types.pop_front();
-        }
+        self.state.sent_types.push(message.get_type());
 
         self.state.current_batch.push(message);
     }
@@ -822,10 +820,7 @@ mod tests {
         let mut processing = create_test_processing();
 
         let parent_sig = b"11111".to_vec();
-        processing
-            .state
-            .sent_signatures
-            .push_back(parent_sig.clone());
+        processing.state.sent_signatures.push(parent_sig.clone());
 
         let red_parent = create_test_message(0, 8, None);
         let red_child = create_test_message(0, 9, Some(parent_sig.clone()));
